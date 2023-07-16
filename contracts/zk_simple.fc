@@ -1,0 +1,151 @@
+#include "imports/stdlib.fc";
+
+const op::verify = "op::verify"c;
+const int P1_SIZE = 48 * 8;
+const int P2_SIZE = 96 * 8;
+
+
+
+const slice IC0 = "b514a6870a13f33f07bc314cdad5d426c61c50b453316c241852089aada4a73a658d36124c4df0088f2cd8838731b971"s;
+const slice IC1 = "8f9fdde28ca907af4acff24f772448a1fa906b1b51ba34f1086c97cd2c3ac7b5e0e143e4161258576d2a996c533d6078"s;
+
+const slice vk_gamma_2 = "93e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8"s;
+const slice vk_delta_2 = "97b0fdbc9553a62a79970134577d1b86f7da8937dd9f4d3d5ad33844eafb47096c99ee36d2eab4d58a1f5b8cc46faa3907e3f7b12cf45449278832eb4d902eed1d5f446e5df9f03e3ce70b6aea1d2497fd12ed91bd1d5b443821223dca2d19c7"s;
+const slice vk_alpha_1 = "a3fa7b5f78f70fbd1874ffc2104f55e658211db8a938445b4a07bdedd966ec60090400413d81f0b6e7e9afac958abfea"s;
+const slice vk_beta_2 = "b17e1924160eff0f027c872bc13ad3b60b2f5076585c8bce3e5ea86e3e46e9507f40c4600401bf5e88c7d6cceb05e8800712029d2eff22cbf071a5eadf166f266df75ad032648e8e421550f9e9b6c497b890a1609a349fbef9e61802fa7d9af5"s;
+
+slice bls_g1_add(slice x, slice y) asm "BLS_G1_ADD";
+slice bls_g1_neg(slice x) asm "BLS_G1_NEG";
+slice bls_g1_multiexp(
+
+        slice x1, int y1,
+
+        int n
+) asm "BLS_G1_MULTIEXP";
+int bls_pairing(slice x1, slice y1, slice x2, slice y2, slice x3, slice y3, slice x4, slice y4, int n) asm "BLS_PAIRING";
+
+global int ctx_res;
+
+;; load_data populates storage variables using stored data
+() load_data() impure {
+
+    var ds = get_data().begin_parse();
+
+    ctx_res = ds~load_uint(32);
+
+    ds.end_parse();
+}
+
+;; save_data stores storage variables as a cell into persistent storage
+() save_data() impure {
+    set_data(
+            begin_cell()
+                    .store_uint(ctx_res, 32)
+                    .end_cell()
+    );
+}
+
+
+(slice, slice) load_p1(slice body) impure {
+    cell c = body~load_ref();
+    slice s = c.begin_parse();
+    slice p1 = first_bits(s, P1_SIZE);
+    s~skip_bits(P1_SIZE);
+    return (s, p1);
+}
+
+(slice, slice) load_p2(slice body) impure {
+    cell c = body~load_ref();
+    slice s = c.begin_parse();
+    slice p2 = first_bits(s, P2_SIZE);
+    s~skip_bits(P2_SIZE);
+    return (s, p2);
+}
+
+(slice, int) load_newint(slice body) impure {
+    cell c = body~load_ref();
+    slice s = c.begin_parse();
+    int x = s~load_uint(256);
+    return (s, x);
+}
+
+() groth16Verify(
+        slice pi_a,
+        slice pi_b,
+        slice pi_c,
+
+        int pubInput0
+
+) impure {
+
+    slice cpub = bls_g1_multiexp(
+
+            IC1, pubInput0,
+
+            1
+    );
+
+
+    cpub = bls_g1_add(cpub, IC0);
+    slice pi_a_neg = bls_g1_neg(pi_a);
+    int a = bls_pairing(
+            cpub, vk_gamma_2,
+            pi_a_neg, pi_b,
+            pi_c, vk_delta_2,
+            vk_alpha_1, vk_beta_2,
+            4);
+    ;; ctx_res = a;
+    if (a == 0) {
+        ctx_res = 0;
+    } else {
+        ctx_res = 1;
+    }
+    save_data();
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+    if (in_msg_body.slice_empty?()) { ;; ignore all empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+
+    int op = in_msg_body~load_uint(32); ;; by convention, the first 32 bits of incoming message is the op
+    int query_id = in_msg_body~load_uint(64); ;; also by convention, the next 64 bits contain the "query id", although this is not always the case
+
+
+    if (op == op::verify) {
+
+        slice pi_a = in_msg_body~load_p1();
+        slice pi_b = in_msg_body~load_p2();
+        slice pi_c = in_msg_body~load_p1();
+
+
+
+        int pubInput0 = in_msg_body~load_newint();
+
+
+        groth16Verify(
+                pi_a,
+                pi_b,
+                pi_c,
+
+                pubInput0
+
+        );
+        return ();
+    }
+
+    throw(0xffff); ;; if the message contains an op that is not known to this contract, we throw
+}
+
+
+int get_res() method_id {
+    load_data();
+    return ctx_res;
+}
